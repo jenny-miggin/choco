@@ -14,6 +14,13 @@ executors:
     shell: powershell.exe
 
 commands:
+  # Cake LocalBuild / GitVersion need full history (GHA uses fetch-depth: 0).
+  checkout-full:
+    description: Full git clone (CircleCI default is blobless/shallow)
+    steps:
+      - checkout:
+          method: full
+
   install-dotnet-5:
     description: Install .NET SDK 5.0 (required by GitVersion in the Cake build)
     parameters:
@@ -54,7 +61,7 @@ jobs:
   ubuntu-build:
     executor: ubuntu
     steps:
-      - checkout
+      - checkout-full
       - restore_cache:
           keys:
             - tools-v1-{{ checksum "recipe.cake" }}
@@ -93,7 +100,7 @@ jobs:
   windows-build:
     executor: windows
     steps:
-      - checkout
+      - checkout-full
       - restore_cache:
           keys:
             - tools-v1-{{ checksum "recipe.cake" }}
@@ -126,7 +133,7 @@ jobs:
   docker-build:
     executor: ubuntu
     steps:
-      - checkout
+      - checkout-full
       - setup_remote_docker:
           docker_layer_caching: true
       - run:
