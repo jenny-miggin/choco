@@ -25,7 +25,7 @@ commands:
           method: full
 
   install-dotnet-5:
-    description: Install .NET SDK 5.0 (required by GitVersion in the Cake build)
+    description: Install .NET SDK for GitVersion (6.0 on Linux for OpenSSL 3 / Ubuntu 22.04)
     parameters:
       platform:
         type: enum
@@ -36,17 +36,12 @@ commands:
             equal: [linux, << parameters.platform >>]
           steps:
             - run:
-                name: Install .NET SDK 5.0
+                name: Install .NET SDK
                 command: |
-                  # .NET 5 requires libssl 1.1 on Ubuntu 22.04 (CircleCI machine image)
-                  sudo apt-get update
-                  sudo DEBIAN_FRONTEND=noninteractive apt-get install -y libssl1.1 || {
-                    curl -fsSL -o /tmp/libssl1.1.deb http://archive.ubuntu.com/ubuntu/pool/main/o/openssl/libssl1.1_1.1.1f-1ubuntu2.22_amd64.deb
-                    sudo dpkg -i /tmp/libssl1.1.deb
-                  }
+                  # .NET 5 needs libssl1.1 (not on Ubuntu 22.04); 6.0 works with OpenSSL 3
                   curl -sSL https://dot.net/v1/dotnet-install.sh -o dotnet-install.sh
                   chmod +x dotnet-install.sh
-                  ./dotnet-install.sh --channel 5.0
+                  ./dotnet-install.sh --channel 6.0
                   echo 'export DOTNET_ROOT=$HOME/.dotnet' >> $BASH_ENV
                   echo 'export PATH=$HOME/.dotnet/tools:$HOME/.dotnet:$PATH' >> $BASH_ENV
                   source $BASH_ENV
