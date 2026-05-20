@@ -1,0 +1,164 @@
+# CircleCI build pipeline for Chocolatey (mirrors .github/workflows/build.yml).
+# Windows job validates process-tree enumeration under CI (see ProcessInformation.cs).
+
+version: 2.1
+
+executors:
+  ubuntu:
+    machine:
+      image: ubuntu-2204:current
+  docker:
+    docker:
+      - image: cimg/base:current
+  windows:
+    machine:
+      image: windows-server-2022-gui:current
+      resource_class: windows.medium
+    shell: powershell.exe
+
+commands:
+  # Cake LocalBuild / GitVersion need full history (GHA uses fetch-depth: 0).
+  checkout-full:
+    description: Full git clone (CircleCI default is blobless/shallow)
+    steps:
+      - checkout:
+          method: full
+
+  install-dotnet-5:
+    description: Install .NET SDK for GitVersion (6.0 on Linux for OpenSSL 3 / Ubuntu 22.04)
+    parameters:
+      platform:
+        type: enum
+        enum: [linux, windows]
+    steps:
+      - when:
+          condition:
+            equal: [linux, << parameters.platform >>]
+          steps:
+            - run:
+                name: Install .NET SDK
+                command: |
+                  # .NET 5 needs libssl1.1 (not on Ubuntu 22.04); 6.0 works with OpenSSL 3
+                  curl -sSL https://dot.net/v1/dotnet-install.sh -o dotnet-install.sh
+                  chmod +x dotnet-install.sh
+                  ./dotnet-install.sh --channel 6.0
+                  echo 'export DOTNET_ROOT=$HOME/.dotnet' >> $BASH_ENV
+                  echo 'export PATH=$HOME/.dotnet/tools:$HOME/.dotnet:$PATH' >> $BASH_ENV
+                  source $BASH_ENV
+                  dotnet --info
+      - when:
+          condition:
+            equal: [windows, << parameters.platform >>]
+          steps:
+            - run:
+                name: Install .NET SDK 5.0
+                command: |
+                  Invoke-WebRequest -Uri https://dot.net/v1/dotnet-install.ps1 -OutFile dotnet-install.ps1
+                  & .\dotnet-install.ps1 -Channel 5.0
+                  $env:DOTNET_ROOT = "$env:USERPROFILE\.dotnet"
+                  $env:PATH = "$env:DOTNET_ROOT;$env:PATH"
+                  [Environment]::SetEnvironmentVariable("DOTNET_ROOT", $env:DOTNET_ROOT, "Machine")
+                  [Environment]::SetEnvironmentVariable("PATH", $env:PATH, "Machine")
+                  dotnet --info
+
+  install-gitversion-tool:
+    description: Pre-install GitVersion.Tool for Cake on Linux (preferDotNetGlobalToolUsage)
+    steps:
+      - run:
+          name: Install GitVersion.Tool global tool
+          command: |
+            source $BASH_ENV
+            dotnet tool install --global GitVersion.Tool --version 5.12.0
+            dotnet tool list --global
+            dotnet-gitversion /version
+
+jobs:
+  ubuntu-build:
+    executor: ubuntu
+    steps:
+      - checkout-full
+      - restore_cache:
+          keys:
+            - tools-v1-{{ checksum "recipe.cake" }}
+            - tools-v1-
+      - run:
+          name: Install Mono
+          command: |
+            sudo apt-get update
+            sudo apt-get install -y ca-certificates gnupg
+            sudo gpg --homedir /tmp --no-default-keyring --keyring /usr/share/keyrings/mono-official-archive-keyring.gpg --keyserver hkp://keyserver.ubuntu.com:80 --recv-keys 3FA7E0328081BFF6A14DA29AA6A19B38D3D831EF
+            echo "deb [signed-by=/usr/share/keyrings/mono-official-archive-keyring.gpg] https://download.mono-project.com/repo/ubuntu stable-focal main" | sudo tee /etc/apt/sources.list.d/mono-official-stable.list
+            sudo apt-get update
+            sudo apt-get install -y mono-complete
+            mono --version
+      - install-dotnet-5:
+          platform: linux
+      - install-gitversion-tool
+      - run:
+          name: Build with Mono
+          command: |
+            source $BASH_ENV
+            chmod +x build.sh
+            ./build.sh --verbosity=diagnostic --target=CI --testExecutionType=unit
+      - save_cache:
+          key: tools-v1-{{ checksum "recipe.cake" }}
+          paths:
+            - tools
+      - store_artifacts:
+          path: code_drop/TestResults/issues-report.html
+      - store_artifacts:
+          path: code_drop/TestResults/NUnit/TestResult.xml
+      - store_artifacts:
+          path: code_drop/Packages/NuGet
+      - store_artifacts:
+          path: code_drop/MsBuild.log
+
+  windows-build:
+    executor: windows
+    steps:
+      - checkout-full
+      - restore_cache:
+          keys:
+            - tools-v1-{{ checksum "recipe.cake" }}
+            - tools-v1-
+      - install-dotnet-5:
+          platform: windows
+      - run:
+          name: Build with .NET Framework
+          command: |
+            $env:DOTNET_ROOT = "$env:USERPROFILE\.dotnet"
+            $env:PATH = "$env:DOTNET_ROOT;$env:PATH"
+            .\build.ps1 --verbosity=diagnostic --target=CI --testExecutionType=unit --shouldRunOpenCover=false --shouldBuildMsi=true
+      - save_cache:
+          key: tools-v1-{{ checksum "recipe.cake" }}
+          paths:
+            - tools
+      - store_artifacts:
+          path: code_drop/TestResults/issues-report.html
+      - store_artifacts:
+          path: code_drop/TestResults/NUnit/TestResult.xml
+      - store_artifacts:
+          path: code_drop/TestCoverage
+      - store_artifacts:
+          path: code_drop/Packages
+      - store_artifacts:
+          path: code_drop/MSIs
+      - store_artifacts:
+          path: code_drop/MsBuild.log
+
+  docker-build:
+    executor: docker
+    steps:
+      - checkout-full
+      - setup_remote_docker:
+          docker_layer_caching: true
+      - run:
+          name: Build Docker image
+          command: docker build -f docker/Dockerfile.linux -t chocolatey/choco:latest .
+
+workflows:
+  chocolatey-builds:
+    jobs:
+      - ubuntu-build
+      - windows-build
+      - docker-build
