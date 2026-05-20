@@ -38,6 +38,12 @@ commands:
             - run:
                 name: Install .NET SDK 5.0
                 command: |
+                  # .NET 5 requires libssl 1.1 on Ubuntu 22.04 (CircleCI machine image)
+                  sudo apt-get update
+                  sudo DEBIAN_FRONTEND=noninteractive apt-get install -y libssl1.1 || {
+                    curl -fsSL -o /tmp/libssl1.1.deb http://archive.ubuntu.com/ubuntu/pool/main/o/openssl/libssl1.1_1.1.1f-1ubuntu2.22_amd64.deb
+                    sudo dpkg -i /tmp/libssl1.1.deb
+                  }
                   curl -sSL https://dot.net/v1/dotnet-install.sh -o dotnet-install.sh
                   chmod +x dotnet-install.sh
                   ./dotnet-install.sh --channel 5.0
