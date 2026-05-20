@@ -45,17 +45,6 @@ commands:
                   echo 'export PATH=$HOME/.dotnet/tools:$HOME/.dotnet:$PATH' >> $BASH_ENV
                   source $BASH_ENV
                   dotnet --info
-
-  install-gitversion-tool:
-    description: Pre-install GitVersion.Tool for Cake on Linux (preferDotNetGlobalToolUsage)
-    steps:
-      - run:
-          name: Install GitVersion.Tool global tool
-          command: |
-            source $BASH_ENV
-            dotnet tool install --global GitVersion.Tool --version 5.12.0
-            dotnet tool list --global
-            dotnet-gitversion /version
       - when:
           condition:
             equal: [windows, << parameters.platform >>]
@@ -70,6 +59,17 @@ commands:
                   [Environment]::SetEnvironmentVariable("DOTNET_ROOT", $env:DOTNET_ROOT, "Machine")
                   [Environment]::SetEnvironmentVariable("PATH", $env:PATH, "Machine")
                   dotnet --info
+
+  install-gitversion-tool:
+    description: Pre-install GitVersion.Tool for Cake on Linux (preferDotNetGlobalToolUsage)
+    steps:
+      - run:
+          name: Install GitVersion.Tool global tool
+          command: |
+            source $BASH_ENV
+            dotnet tool install --global GitVersion.Tool --version 5.12.0
+            dotnet tool list --global
+            dotnet-gitversion /version
 
 jobs:
   ubuntu-build:
