@@ -7,6 +7,9 @@ executors:
   ubuntu:
     machine:
       image: ubuntu-2204:current
+  docker:
+    docker:
+      - image: cimg/base:current
   windows:
     machine:
       image: windows-server-2022-gui:current
@@ -131,7 +134,7 @@ jobs:
           path: code_drop/MsBuild.log
 
   docker-build:
-    executor: ubuntu
+    executor: docker
     steps:
       - checkout-full
       - setup_remote_docker:
