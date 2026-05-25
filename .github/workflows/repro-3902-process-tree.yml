@@ -95,6 +95,19 @@ jobs:
           New-Item -ItemType Directory -Force -Path .github/scripts | Out-Null
           git show "origin/repro/process-tree-hang:.github/scripts/Repro-ProcessTreeHang.ps1" | Set-Content -Path $scriptPath -Encoding utf8NoBOM
 
+      # CI target runs PSScriptAnalyzer via Cake; needs NuGet/PackageManagement cmdlets on the runner.
+      - name: Install PowerShell modules for Cake build
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+          if (-not (Get-PackageProvider -Name NuGet -ErrorAction SilentlyContinue)) {
+            Install-PackageProvider -Name NuGet -MinimumVersion 2.8.5.201 -Force
+          }
+          Set-PSRepository -Name PSGallery -InstallationPolicy Trusted -ErrorAction SilentlyContinue
+          Install-Module -Name PackageManagement, PowerShellGet -Repository PSGallery -Force -Scope CurrentUser -AllowClobber
+          Get-PackageProvider -ListAvailable | Format-Table Name, Version
+
       - name: Build and repro until hang or rounds exhausted
         id: repro_loop
         shell: pwsh
@@ -117,9 +130,14 @@ jobs:
                 Write-Host 'Removing code_drop before rebuild...'
                 Remove-Item -LiteralPath 'code_drop' -Recurse -Force -ErrorAction SilentlyContinue
               }
-              ./build.ps1 --verbosity=diagnostic --target=CI --testExecutionType=unit --shouldRunOpenCover=false --shouldBuildMsi=false --shouldRunTests=false
+              # Same flags as .github/workflows/build.yml windows-build (known good on GHA).
+              & ./build.ps1 --verbosity=diagnostic --target=CI --testExecutionType=unit --shouldRunOpenCover=false --shouldBuildMsi=true
               if ($LASTEXITCODE -ne 0) {
-                Write-Error "build.ps1 failed in round $round with exit $LASTEXITCODE"
+                if (Test-Path -LiteralPath 'code_drop/MsBuild.log') {
+                  Write-Host '--- tail code_drop/MsBuild.log ---'
+                  Get-Content -LiteralPath 'code_drop/MsBuild.log' -Tail 80
+                }
+                Write-Error "build.ps1 failed in round $round with exit $LASTEXITCODE (often PSScriptAnalyzer / Get-PackageProvider if modules step was skipped)"
                 exit 1
               }
             }
