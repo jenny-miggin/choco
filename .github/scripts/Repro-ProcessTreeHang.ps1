@@ -1,5 +1,5 @@
-# Reproduces chocolatey/choco#3902 on Windows: GetProcessTree / NuGet user-agent path.
-# Exits 0 if every run completes and logs "Process Tree:"; exits 1 on timeout or missing log line.
+# Reproduces chocolatey/choco#3902 on Windows: GetProcessTree via NugetCommon.GetRemoteRepositories.
+# Exit 0 = no hang this run; exit 2 = hang reproduced (timeout); exit 1 = setup/runtime error.
 
 [CmdletBinding()]
 param(
@@ -7,6 +7,12 @@ param(
     [string]$ChocoExe,
 
     [int]$TimeoutSeconds = 90,
+
+    # UntilHang: loop 'search' until timeout or MaxAttempts. Legacy: run Iterations x scenarios once.
+    [ValidateSet('UntilHang', 'Once')]
+    [string]$Mode = 'UntilHang',
+
+    [int]$MaxAttempts = 200,
 
     [int]$Iterations = 3
 )
@@ -88,10 +94,30 @@ function Test-ProcessTreeLogged {
     return ($CombinedOutput -match '(?m)^Process Tree:')
 }
 
+function Write-HangReproduced {
+    param(
+        [int]$Attempt,
+        [string]$LogFile,
+        [double]$ElapsedSeconds
+    )
+
+    $message = "#3902 HANG REPRODUCED on attempt $Attempt after ${ElapsedSeconds}s (see $LogFile)"
+    Write-Host "::error::$message"
+    Set-Content -Path (Join-Path $env:RUNNER_TEMP 'repro-3902/HANG-REPRODUCED.txt') -Value $message -Encoding UTF8
+    if ($env:GITHUB_OUTPUT) {
+        "hang_reproduced=true" >> $env:GITHUB_OUTPUT
+        "hang_attempt=$Attempt" >> $env:GITHUB_OUTPUT
+        "hang_log_file=$LogFile" >> $env:GITHUB_OUTPUT
+    }
+}
+
 if (-not (Test-Path -LiteralPath $ChocoExe)) {
     Write-Error "choco.exe not found at: $ChocoExe"
-    exit 2
+    exit 1
 }
+
+$logRoot = Join-Path $env:RUNNER_TEMP 'repro-3902'
+New-Item -ItemType Directory -Force -Path $logRoot | Out-Null
 
 Write-Section 'Environment'
 Write-Host "Computer: $env:COMPUTERNAME"
@@ -99,6 +125,7 @@ Write-Host "User: $env:USERNAME"
 Write-Host "Session: $(if ($env:SESSIONNAME) { $env:SESSIONNAME } else { '(empty)' })"
 Write-Host "OS: $([Environment]::OSVersion.VersionString)"
 Write-Host "PowerShell: $($PSVersionTable.PSVersion)"
+Write-Host "Mode: $Mode"
 Write-Host "GITHUB_RUN_ID: $env:GITHUB_RUN_ID"
 Write-Host "GITHUB_REF: $env:GITHUB_REF"
 Write-Host "GITHUB_SHA: $env:GITHUB_SHA"
@@ -106,24 +133,54 @@ Write-Host "GITHUB_SHA: $env:GITHUB_SHA"
 Write-Section 'Parent process chain (PowerShell host)'
 Get-ParentProcessChain | ForEach-Object { Write-Host "  $_" }
 
-# GetProcessTree() is invoked from NugetCommon.GetRemoteRepositories (user-agent / process tree logging).
-# Commands that only touch local state may never hit that path.
-# Release CI builds require --allow-unofficial-build (see CONTRIBUTING.md).
-$commonArgs = @('--allow-unofficial-build', '--debug', '--verbose')
+# Hits GetProcessTree() via GetRemoteRepositories. Release CI builds need --allow-unofficial-build.
+$searchArgs = @('search', 'chocolatey', '--allow-unofficial-build', '--debug', '--verbose')
 
+if ($Mode -eq 'UntilHang') {
+    Write-Section "UntilHang: up to $MaxAttempts search attempts (timeout ${TimeoutSeconds}s each)"
+
+    for ($attempt = 1; $attempt -le $MaxAttempts; $attempt++) {
+        $logFile = Join-Path $logRoot ("attempt-{0:D4}-search.log" -f $attempt)
+        $sw = [System.Diagnostics.Stopwatch]::StartNew()
+        $result = Invoke-ChocoWithTimeout -Exe $ChocoExe -Arguments $searchArgs -TimeoutSec $TimeoutSeconds
+        $sw.Stop()
+
+        $combined = $result.StdOut + "`n" + $result.StdErr
+        $combined | Set-Content -Path $logFile -Encoding UTF8
+
+        $hasProcessTree = Test-ProcessTreeLogged -CombinedOutput $combined
+        Write-Host "attempt $attempt/$MaxAttempts : elapsed=$([math]::Round($sw.Elapsed.TotalSeconds, 2))s exit=$($result.ExitCode) timedOut=$($result.TimedOut) processTreeLogged=$hasProcessTree"
+
+        if ($result.TimedOut) {
+            Write-HangReproduced -Attempt $attempt -LogFile $logFile -ElapsedSeconds $sw.Elapsed.TotalSeconds
+            exit 2
+        }
+
+        if (-not $hasProcessTree) {
+            Write-Host "::warning::Attempt $attempt finished without 'Process Tree:' — command may have failed before enumeration (log: $logFile)"
+        }
+
+        if ($attempt % 25 -eq 0) {
+            Write-Host "Progress: $attempt / $MaxAttempts attempts without hang so far."
+        }
+    }
+
+    Write-Section 'Summary'
+    Write-Host "Result: No hang after $MaxAttempts attempts on this build."
+    if ($env:GITHUB_OUTPUT) { "hang_reproduced=false" >> $env:GITHUB_OUTPUT }
+    exit 0
+}
+
+# Mode Once (smoke / legacy)
+$commonArgs = @('--allow-unofficial-build', '--debug', '--verbose')
 $scenarios = @(
     @{ Name = 'search'; Args = @('search', 'chocolatey') + $commonArgs },
-    @{ Name = 'info'; Args = @('info', 'chocolatey') + $commonArgs },
-    @{ Name = 'list'; Args = @('list') + $commonArgs }
+    @{ Name = 'info'; Args = @('info', 'chocolatey') + $commonArgs }
 )
 
-$anyFailure = $false
-$logRoot = Join-Path $env:RUNNER_TEMP 'repro-3902'
-New-Item -ItemType Directory -Force -Path $logRoot | Out-Null
-
+$hangDetected = $false
 for ($i = 1; $i -le $Iterations; $i++) {
     Write-Section "Iteration $i of $Iterations"
-
     foreach ($scenario in $scenarios) {
         $logFile = Join-Path $logRoot ("iter{0}-{1}.log" -f $i, $scenario.Name)
         $sw = [System.Diagnostics.Stopwatch]::StartNew()
@@ -135,24 +192,14 @@ for ($i = 1; $i -le $Iterations; $i++) {
 
         $hasProcessTree = Test-ProcessTreeLogged -CombinedOutput $combined
         Write-Host "  $($scenario.Name): elapsed=$($sw.Elapsed.TotalSeconds)s exit=$($result.ExitCode) timedOut=$($result.TimedOut) processTreeLogged=$hasProcessTree"
-        Write-Host "  log: $logFile"
 
         if ($result.TimedOut) {
-            Write-Host "::error::Timed out after ${TimeoutSeconds}s on '$($scenario.Name)' (iteration $i). Possible #3902 hang before process tree enumeration completed."
-            $anyFailure = $true
-        }
-        elseif (-not $hasProcessTree) {
-            Write-Host "::warning::Completed but no 'Process Tree:' line in output for '$($scenario.Name)' (iteration $i). Check log — may have failed earlier or logging differed."
-            $anyFailure = $true
+            Write-HangReproduced -Attempt $i -LogFile $logFile -ElapsedSeconds $sw.Elapsed.TotalSeconds
+            $hangDetected = $true
         }
     }
 }
 
-Write-Section 'Summary'
-if ($anyFailure) {
-    Write-Host 'Result: REPRO INDICATORS PRESENT (timeout and/or missing Process Tree log). See artifacts under repro-3902.'
-    exit 1
-}
-
-Write-Host 'Result: No hang detected in this run; all scenarios completed with Process Tree logged.'
+if ($hangDetected) { exit 2 }
+Write-Host 'Result: No hang detected (Once mode).'
 exit 0

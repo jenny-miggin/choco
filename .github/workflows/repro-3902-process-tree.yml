@@ -1,33 +1,41 @@
-# Manual repro for https://github.com/chocolatey/choco/issues/3902 on GitHub-hosted Windows runners.
-# Run from your fork: Actions → "Repro #3902 Process Tree" → Run workflow.
-# Use ref=develop to test stock behavior (no timeout fix). Use your branch to compare.
+# Keeps trying to reproduce chocolatey/choco#3902 on GitHub Actions (windows-latest).
+# - Scheduled every 4 hours on repro/process-tree-hang
+# - Each run: optional multiple full builds, then many choco search loops until timeout or cap
+# - Job fails when hang is reproduced (so you get notified); succeeds when no hang (schedule keeps trying)
 
 name: 'Repro #3902 Process Tree'
 
 on:
-  # Also run when pushing to the repro branch (workflow must exist on that ref).
+  schedule:
+    # Every 4 hours (UTC). Disable by removing this block when done investigating.
+    - cron: '17 */4 * * *'
   push:
     branches:
       - repro/process-tree-hang
   workflow_dispatch:
     inputs:
       git_ref:
-        description: 'Branch, tag, or SHA to build and test (use develop for stock code without the timeout fix)'
+        description: 'Source to build (develop = stock, no timeout fix)'
         required: true
         default: develop
         type: string
       hang_timeout_seconds:
-        description: 'Per-command timeout (seconds) before treating as a hang'
+        description: 'Per choco search timeout (seconds)'
         required: true
         default: '90'
         type: string
-      iterations:
-        description: 'How many times to run each choco scenario'
+      max_search_attempts:
+        description: 'Max search loops per build before this job gives up'
+        required: true
+        default: '200'
+        type: string
+      build_rounds:
+        description: 'Full CI builds per job (rebuild from scratch each round)'
         required: true
         default: '3'
         type: string
       skip_full_build:
-        description: 'Skip build; only run repro if choco.exe already exists in code_drop (advanced)'
+        description: 'Skip build; only loop repro against existing code_drop'
         required: true
         default: 'false'
         type: choice
@@ -35,18 +43,22 @@ on:
           - 'false'
           - 'true'
 
+concurrency:
+  group: repro-3902-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   repro-windows:
     runs-on: windows-latest
-    timeout-minutes: 120
+    timeout-minutes: 360
     env:
-      # On push to repro/process-tree-hang, always test stock develop (no timeout fix).
       REPRO_GIT_REF: ${{ github.event.inputs.git_ref || 'develop' }}
       REPRO_TIMEOUT_SECONDS: ${{ github.event.inputs.hang_timeout_seconds || '90' }}
-      REPRO_ITERATIONS: ${{ github.event.inputs.iterations || '3' }}
+      REPRO_MAX_ATTEMPTS: ${{ github.event.inputs.max_search_attempts || '200' }}
+      REPRO_BUILD_ROUNDS: ${{ github.event.inputs.build_rounds || '3' }}
       REPRO_SKIP_BUILD: ${{ github.event.inputs.skip_full_build || 'false' }}
     steps:
-      - name: Checkout
+      - name: Checkout source under test
         uses: actions/checkout@v4
         with:
           ref: ${{ env.REPRO_GIT_REF }}
@@ -67,8 +79,9 @@ jobs:
         shell: pwsh
         run: |
           Write-Host "Runner OS: $env:RUNNER_OS"
-          Write-Host "Runner arch: $env:RUNNER_ARCH"
           Write-Host "Ref under test: $env:REPRO_GIT_REF"
+          Write-Host "Build rounds: $env:REPRO_BUILD_ROUNDS"
+          Write-Host "Max search attempts per build: $env:REPRO_MAX_ATTEMPTS"
           Write-Host "Trigger: ${{ github.event_name }}"
           Write-Host "SHA: $(git rev-parse HEAD)"
           dotnet --info
@@ -77,59 +90,93 @@ jobs:
         shell: pwsh
         run: |
           $scriptPath = '.github/scripts/Repro-ProcessTreeHang.ps1'
-          if (Test-Path -LiteralPath $scriptPath) {
-            Write-Host "Repro script already in tree."
-            exit 0
-          }
-          Write-Host 'Fetching repro script from origin/repro/process-tree-hang...'
+          if (Test-Path -LiteralPath $scriptPath) { exit 0 }
           git fetch origin repro/process-tree-hang --depth=1
           New-Item -ItemType Directory -Force -Path .github/scripts | Out-Null
           git show "origin/repro/process-tree-hang:.github/scripts/Repro-ProcessTreeHang.ps1" | Set-Content -Path $scriptPath -Encoding utf8NoBOM
-          if (-not (Test-Path -LiteralPath $scriptPath)) {
-            Write-Error "Failed to materialize $scriptPath"
+
+      - name: Build and repro until hang or rounds exhausted
+        id: repro_loop
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $buildRounds = [int]$env:REPRO_BUILD_ROUNDS
+          $maxAttempts = [int]$env:REPRO_MAX_ATTEMPTS
+          $timeoutSec = [int]$env:REPRO_TIMEOUT_SECONDS
+          $skipBuild = $env:REPRO_SKIP_BUILD -eq 'true'
+
+          $chocoExe = $null
+          $hangFound = $false
+
+          for ($round = 1; $round -le $buildRounds; $round++) {
+            Write-Host ""
+            Write-Host "========== Build round $round of $buildRounds =========="
+
+            if (-not $skipBuild) {
+              if ($round -gt 1 -and (Test-Path -LiteralPath 'code_drop')) {
+                Write-Host 'Removing code_drop before rebuild...'
+                Remove-Item -LiteralPath 'code_drop' -Recurse -Force -ErrorAction SilentlyContinue
+              }
+              ./build.ps1 --verbosity=diagnostic --target=CI --testExecutionType=unit --shouldRunOpenCover=false --shouldBuildMsi=false --shouldRunTests=false
+              if ($LASTEXITCODE -ne 0) {
+                Write-Error "build.ps1 failed in round $round with exit $LASTEXITCODE"
+                exit 1
+              }
+            }
+
+            $candidates = @(
+              'code_drop/temp/_PublishedApps/choco_merged/choco.exe',
+              'code_drop/temp/_PublishedApps/choco/choco.exe'
+            )
+            $chocoExe = $null
+            foreach ($path in $candidates) {
+              if (Test-Path -LiteralPath $path) {
+                $chocoExe = (Resolve-Path -LiteralPath $path).Path
+                break
+              }
+            }
+            if (-not $chocoExe) {
+              $found = Get-ChildItem -Path code_drop -Recurse -Filter choco.exe -ErrorAction SilentlyContinue | Select-Object -First 1
+              if ($found) { $chocoExe = $found.FullName }
+            }
+            if (-not $chocoExe) {
+              Write-Error "choco.exe not found after build round $round"
+              exit 1
+            }
+            Write-Host "Using choco.exe: $chocoExe"
+
+            & ./.github/scripts/Repro-ProcessTreeHang.ps1 `
+              -ChocoExe $chocoExe `
+              -Mode UntilHang `
+              -TimeoutSeconds $timeoutSec `
+              -MaxAttempts $maxAttempts
+
+            $reproExit = $LASTEXITCODE
+            if ($reproExit -eq 2) {
+              Write-Host "::notice::#3902 hang reproduced in build round $round"
+              "hang_reproduced=true" >> $env:GITHUB_OUTPUT
+              "hang_build_round=$round" >> $env:GITHUB_OUTPUT
+              $hangFound = $true
+              break
+            }
+            if ($reproExit -ne 0) {
+              Write-Error "Repro script failed with exit $reproExit in round $round"
+              exit 1
+            }
+
+            Write-Host "Round $round : no hang after $maxAttempts search attempts."
+            $skipBuild = $false
+          }
+
+          if ($hangFound) {
+            Write-Host "::error::#3902 process tree hang reproduced — see repro-3902 artifacts and HANG-REPRODUCED.txt"
+            # Fail the job so GitHub notifies you; see Job summary for details.
             exit 1
           }
 
-      # Match .github/workflows/build.yml windows-build (Release); skip MSI/tests for speed.
-      - name: Build choco (CI target, same as upstream Windows CI)
-        if: env.REPRO_SKIP_BUILD != 'true'
-        shell: powershell
-        run: ./build.ps1 --verbosity=diagnostic --target=CI --testExecutionType=unit --shouldRunOpenCover=false --shouldBuildMsi=false --shouldRunTests=false
-
-      - name: Locate choco.exe
-        id: choco
-        shell: pwsh
-        run: |
-          $candidates = @(
-            'code_drop/temp/_PublishedApps/choco_merged/choco.exe',
-            'code_drop/temp/_PublishedApps/choco/choco.exe',
-            'code_drop/Packages/Chocolatey/tools/chocolateyInstall/choco.exe'
-          )
-          foreach ($path in $candidates) {
-            if (Test-Path -LiteralPath $path) {
-              $full = (Resolve-Path -LiteralPath $path).Path
-              Write-Host "Using choco.exe: $full"
-              "path=$full" >> $env:GITHUB_OUTPUT
-              exit 0
-            }
-          }
-          Write-Host 'Searching code_drop for choco.exe...'
-          $found = Get-ChildItem -Path code_drop -Recurse -Filter choco.exe -ErrorAction SilentlyContinue | Select-Object -First 1
-          if ($found) {
-            Write-Host "Using choco.exe: $($found.FullName)"
-            "path=$($found.FullName)" >> $env:GITHUB_OUTPUT
-            exit 0
-          }
-          Write-Error 'choco.exe not found under code_drop. Build may have failed or paths changed.'
-          exit 1
-
-      - name: Repro GetProcessTree via choco -dv
-        shell: pwsh
-        run: |
-          & ./.github/scripts/Repro-ProcessTreeHang.ps1 `
-            -ChocoExe '${{ steps.choco.outputs.path }}' `
-            -TimeoutSeconds $env:REPRO_TIMEOUT_SECONDS `
-            -Iterations $env:REPRO_ITERATIONS
+          Write-Host "::warning::No hang after $buildRounds full build(s) and $maxAttempts searches per build. Scheduled run will try again."
+          "hang_reproduced=false" >> $env:GITHUB_OUTPUT
+          exit 0
 
       - name: Upload repro logs
         if: always()
@@ -140,11 +187,30 @@ jobs:
             ${{ runner.temp }}/repro-3902/**
           if-no-files-found: warn
 
-      - name: Upload build log (on failure)
-        if: failure()
+      - name: Upload build log
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: repro-3902-build-${{ github.run_id }}
           path: |
             code_drop/MsBuild.log
           if-no-files-found: ignore
+
+      - name: Job summary
+        if: always()
+        shell: pwsh
+        run: |
+          $hang = '${{ steps.repro_loop.outputs.hang_reproduced }}'
+          if ($hang -eq 'true') {
+            @"
+          ## #3902 hang reproduced on this runner
+          Build round: ${{ steps.repro_loop.outputs.hang_build_round }}
+          Download artifact ``repro-3902-logs-${{ github.run_id }}`` and attach to the GitHub issue.
+          "@ | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append
+          } else {
+          @"
+          ## No hang this run
+          Will retry on the next schedule (every 4h) or manual dispatch.
+          Increase ``build_rounds`` / ``max_search_attempts`` in workflow inputs if needed.
+          "@ | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append
+          }
