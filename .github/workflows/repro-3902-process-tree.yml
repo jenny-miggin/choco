@@ -1,0 +1,130 @@
+# Manual repro for https://github.com/chocolatey/choco/issues/3902 on GitHub-hosted Windows runners.
+# Run from your fork: Actions → "Repro #3902 Process Tree" → Run workflow.
+# Use ref=develop to test stock behavior (no timeout fix). Use your branch to compare.
+
+name: 'Repro #3902 Process Tree'
+
+on:
+  workflow_dispatch:
+    inputs:
+      git_ref:
+        description: 'Branch, tag, or SHA to build and test'
+        required: true
+        default: develop
+        type: string
+      hang_timeout_seconds:
+        description: 'Per-command timeout (seconds) before treating as a hang'
+        required: true
+        default: '90'
+        type: string
+      iterations:
+        description: 'How many times to run each choco scenario'
+        required: true
+        default: '3'
+        type: string
+      skip_full_build:
+        description: 'Skip build; only run repro if choco.exe already exists in code_drop (advanced)'
+        required: true
+        default: 'false'
+        type: choice
+        options:
+          - 'false'
+          - 'true'
+
+jobs:
+  repro-windows:
+    runs-on: windows-latest
+    timeout-minutes: 90
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.git_ref }}
+          fetch-depth: 0
+
+      - name: Cache Cake tools
+        uses: actions/cache@v4
+        with:
+          path: tools
+          key: ${{ runner.os }}-tools-${{ hashFiles('recipe.cake') }}
+
+      - name: Install dotnet (GitVersion)
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 5.0.x
+
+      - name: Report runner environment
+        shell: pwsh
+        run: |
+          Write-Host "Runner OS: $env:RUNNER_OS"
+          Write-Host "Runner arch: $env:RUNNER_ARCH"
+          Write-Host "Ref under test: ${{ inputs.git_ref }}"
+          Write-Host "SHA: $(git rev-parse HEAD)"
+          dotnet --info
+
+      - name: Build Debug choco (CI target, no unit tests)
+        if: inputs.skip_full_build != 'true'
+        shell: pwsh
+        run: |
+          ./build.ps1 `
+            -Configuration Debug `
+            --verbosity=diagnostic `
+            --target=CI `
+            --testExecutionType=none `
+            --shouldRunOpenCover=false `
+            --shouldBuildMsi=false `
+            --shouldRunTests=false `
+            --shouldRunChocolatey=false
+
+      - name: Locate choco.exe
+        id: choco
+        shell: pwsh
+        run: |
+          $candidates = @(
+            'code_drop/temp/_PublishedApps/choco_merged/choco.exe',
+            'code_drop/temp/_PublishedApps/choco/choco.exe',
+            'code_drop/Packages/Chocolatey/tools/chocolateyInstall/choco.exe'
+          )
+          foreach ($path in $candidates) {
+            if (Test-Path -LiteralPath $path) {
+              $full = (Resolve-Path -LiteralPath $path).Path
+              Write-Host "Using choco.exe: $full"
+              "path=$full" >> $env:GITHUB_OUTPUT
+              exit 0
+            }
+          }
+          Write-Host 'Searching code_drop for choco.exe...'
+          $found = Get-ChildItem -Path code_drop -Recurse -Filter choco.exe -ErrorAction SilentlyContinue | Select-Object -First 1
+          if ($found) {
+            Write-Host "Using choco.exe: $($found.FullName)"
+            "path=$($found.FullName)" >> $env:GITHUB_OUTPUT
+            exit 0
+          }
+          Write-Error 'choco.exe not found under code_drop. Build may have failed or paths changed.'
+          exit 1
+
+      - name: Repro GetProcessTree via choco -dv
+        shell: pwsh
+        run: |
+          & ./.github/scripts/Repro-ProcessTreeHang.ps1 `
+            -ChocoExe '${{ steps.choco.outputs.path }}' `
+            -TimeoutSeconds ${{ inputs.hang_timeout_seconds }} `
+            -Iterations ${{ inputs.iterations }}
+
+      - name: Upload repro logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: repro-3902-logs-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/repro-3902/**
+          if-no-files-found: warn
+
+      - name: Upload build log (on failure)
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: repro-3902-build-${{ github.run_id }}
+          path: |
+            code_drop/MsBuild.log
+          if-no-files-found: ignore
