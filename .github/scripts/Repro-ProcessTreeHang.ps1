@@ -108,10 +108,13 @@ Get-ParentProcessChain | ForEach-Object { Write-Host "  $_" }
 
 # GetProcessTree() is invoked from NugetCommon.GetRemoteRepositories (user-agent / process tree logging).
 # Commands that only touch local state may never hit that path.
+# Release CI builds require --allow-unofficial-build (see CONTRIBUTING.md).
+$commonArgs = @('--allow-unofficial-build', '--debug', '--verbose')
+
 $scenarios = @(
-    @{ Name = 'search'; Args = @('search', 'chocolatey', '--debug', '--verbose') },
-    @{ Name = 'info'; Args = @('info', 'chocolatey', '--debug', '--verbose') },
-    @{ Name = 'list'; Args = @('list', '--debug', '--verbose') }
+    @{ Name = 'search'; Args = @('search', 'chocolatey') + $commonArgs },
+    @{ Name = 'info'; Args = @('info', 'chocolatey') + $commonArgs },
+    @{ Name = 'list'; Args = @('list') + $commonArgs }
 )
 
 $anyFailure = $false

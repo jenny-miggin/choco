@@ -38,7 +38,7 @@ on:
 jobs:
   repro-windows:
     runs-on: windows-latest
-    timeout-minutes: 90
+    timeout-minutes: 120
     env:
       # On push to repro/process-tree-hang, always test stock develop (no timeout fix).
       REPRO_GIT_REF: ${{ github.event.inputs.git_ref || 'develop' }}
@@ -73,19 +73,28 @@ jobs:
           Write-Host "SHA: $(git rev-parse HEAD)"
           dotnet --info
 
-      - name: Build Debug choco (CI target, no unit tests)
-        if: env.REPRO_SKIP_BUILD != 'true'
+      - name: Ensure repro script is present
         shell: pwsh
         run: |
-          ./build.ps1 `
-            -Configuration Debug `
-            --verbosity=diagnostic `
-            --target=CI `
-            --testExecutionType=none `
-            --shouldRunOpenCover=false `
-            --shouldBuildMsi=false `
-            --shouldRunTests=false `
-            --shouldRunChocolatey=false
+          $scriptPath = '.github/scripts/Repro-ProcessTreeHang.ps1'
+          if (Test-Path -LiteralPath $scriptPath) {
+            Write-Host "Repro script already in tree."
+            exit 0
+          }
+          Write-Host 'Fetching repro script from origin/repro/process-tree-hang...'
+          git fetch origin repro/process-tree-hang --depth=1
+          New-Item -ItemType Directory -Force -Path .github/scripts | Out-Null
+          git show "origin/repro/process-tree-hang:.github/scripts/Repro-ProcessTreeHang.ps1" | Set-Content -Path $scriptPath -Encoding utf8NoBOM
+          if (-not (Test-Path -LiteralPath $scriptPath)) {
+            Write-Error "Failed to materialize $scriptPath"
+            exit 1
+          }
+
+      # Match .github/workflows/build.yml windows-build (Release); skip MSI/tests for speed.
+      - name: Build choco (CI target, same as upstream Windows CI)
+        if: env.REPRO_SKIP_BUILD != 'true'
+        shell: powershell
+        run: ./build.ps1 --verbosity=diagnostic --target=CI --testExecutionType=unit --shouldRunOpenCover=false --shouldBuildMsi=false --shouldRunTests=false
 
       - name: Locate choco.exe
         id: choco
