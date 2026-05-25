@@ -105,9 +105,9 @@ function Write-HangReproduced {
     Write-Host "::error::$message"
     Set-Content -Path (Join-Path $env:RUNNER_TEMP 'repro-3902/HANG-REPRODUCED.txt') -Value $message -Encoding UTF8
     if ($env:GITHUB_OUTPUT) {
-        "hang_reproduced=true" >> $env:GITHUB_OUTPUT
-        "hang_attempt=$Attempt" >> $env:GITHUB_OUTPUT
-        "hang_log_file=$LogFile" >> $env:GITHUB_OUTPUT
+        Add-Content -Path $env:GITHUB_OUTPUT -Value 'hang_reproduced=true'
+        Add-Content -Path $env:GITHUB_OUTPUT -Value ('hang_attempt=' + $Attempt)
+        Add-Content -Path $env:GITHUB_OUTPUT -Value ('hang_log_file=' + $LogFile)
     }
 }
 
@@ -157,7 +157,7 @@ if ($Mode -eq 'UntilHang') {
         }
 
         if (-not $hasProcessTree) {
-            Write-Host "::warning::Attempt $attempt finished without 'Process Tree:' — command may have failed before enumeration (log: $logFile)"
+            Write-Host ('::warning::Attempt ' + $attempt + " finished without 'Process Tree:' - see log: " + $logFile)
         }
 
         if ($attempt % 25 -eq 0) {
@@ -167,7 +167,7 @@ if ($Mode -eq 'UntilHang') {
 
     Write-Section 'Summary'
     Write-Host "Result: No hang after $MaxAttempts attempts on this build."
-    if ($env:GITHUB_OUTPUT) { "hang_reproduced=false" >> $env:GITHUB_OUTPUT }
+    if ($env:GITHUB_OUTPUT) { Add-Content -Path $env:GITHUB_OUTPUT -Value 'hang_reproduced=false' }
     exit 0
 }
 

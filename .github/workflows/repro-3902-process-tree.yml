@@ -130,7 +130,7 @@ jobs:
                 Write-Host 'Removing code_drop before rebuild...'
                 Remove-Item -LiteralPath 'code_drop' -Recurse -Force -ErrorAction SilentlyContinue
               }
-              # shouldRunAnalyze=false skips PSScriptAnalyzer (see .teamcity/settings.kts); avoids Get-PackageProvider in Cake's PS 5.1 host.
+              # shouldRunAnalyze=false skips PSScriptAnalyzer; avoids Get-PackageProvider in Cake PS 5.1 host.
               & ./build.ps1 --verbosity=diagnostic --target=CI --testExecutionType=none --shouldRunOpenCover=false --shouldBuildMsi=false --shouldRunAnalyze=false --shouldRunTests=false
               if ($LASTEXITCODE -ne 0) {
                 if (Test-Path -LiteralPath 'code_drop/MsBuild.log') {
@@ -171,9 +171,9 @@ jobs:
 
             $reproExit = $LASTEXITCODE
             if ($reproExit -eq 2) {
-              Write-Host "::notice::#3902 hang reproduced in build round $round"
-              "hang_reproduced=true" >> $env:GITHUB_OUTPUT
-              "hang_build_round=$round" >> $env:GITHUB_OUTPUT
+              Write-Host ('::notice::#3902 hang reproduced in build round ' + $round)
+              Add-Content -Path $env:GITHUB_OUTPUT -Value 'hang_reproduced=true'
+              Add-Content -Path $env:GITHUB_OUTPUT -Value ('hang_build_round=' + $round)
               $hangFound = $true
               break
             }
@@ -187,13 +187,12 @@ jobs:
           }
 
           if ($hangFound) {
-            Write-Host "::error::#3902 process tree hang reproduced — see repro-3902 artifacts and HANG-REPRODUCED.txt"
-            # Fail the job so GitHub notifies you; see Job summary for details.
+            Write-Host '::error::#3902 process tree hang reproduced - see repro-3902 artifacts and HANG-REPRODUCED.txt'
             exit 1
           }
 
-          Write-Host "::warning::No hang after $buildRounds full build(s) and $maxAttempts searches per build. Scheduled run will try again."
-          "hang_reproduced=false" >> $env:GITHUB_OUTPUT
+          Write-Host ('::warning::No hang after ' + $buildRounds + ' full build(s) and ' + $maxAttempts + ' searches per build. Scheduled run will try again.')
+          Add-Content -Path $env:GITHUB_OUTPUT -Value 'hang_reproduced=false'
           exit 0
 
       - name: Upload repro logs
