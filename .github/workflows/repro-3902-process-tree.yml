@@ -5,10 +5,14 @@
 name: 'Repro #3902 Process Tree'
 
 on:
+  # Also run when pushing to the repro branch (workflow must exist on that ref).
+  push:
+    branches:
+      - repro/process-tree-hang
   workflow_dispatch:
     inputs:
       git_ref:
-        description: 'Branch, tag, or SHA to build and test'
+        description: 'Branch, tag, or SHA to build and test (use develop for stock code without the timeout fix)'
         required: true
         default: develop
         type: string
@@ -35,11 +39,17 @@ jobs:
   repro-windows:
     runs-on: windows-latest
     timeout-minutes: 90
+    env:
+      # On push to repro/process-tree-hang, always test stock develop (no timeout fix).
+      REPRO_GIT_REF: ${{ github.event.inputs.git_ref || 'develop' }}
+      REPRO_TIMEOUT_SECONDS: ${{ github.event.inputs.hang_timeout_seconds || '90' }}
+      REPRO_ITERATIONS: ${{ github.event.inputs.iterations || '3' }}
+      REPRO_SKIP_BUILD: ${{ github.event.inputs.skip_full_build || 'false' }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.git_ref }}
+          ref: ${{ env.REPRO_GIT_REF }}
           fetch-depth: 0
 
       - name: Cache Cake tools
@@ -58,12 +68,13 @@ jobs:
         run: |
           Write-Host "Runner OS: $env:RUNNER_OS"
           Write-Host "Runner arch: $env:RUNNER_ARCH"
-          Write-Host "Ref under test: ${{ inputs.git_ref }}"
+          Write-Host "Ref under test: $env:REPRO_GIT_REF"
+          Write-Host "Trigger: ${{ github.event_name }}"
           Write-Host "SHA: $(git rev-parse HEAD)"
           dotnet --info
 
       - name: Build Debug choco (CI target, no unit tests)
-        if: inputs.skip_full_build != 'true'
+        if: env.REPRO_SKIP_BUILD != 'true'
         shell: pwsh
         run: |
           ./build.ps1 `
@@ -108,8 +119,8 @@ jobs:
         run: |
           & ./.github/scripts/Repro-ProcessTreeHang.ps1 `
             -ChocoExe '${{ steps.choco.outputs.path }}' `
-            -TimeoutSeconds ${{ inputs.hang_timeout_seconds }} `
-            -Iterations ${{ inputs.iterations }}
+            -TimeoutSeconds $env:REPRO_TIMEOUT_SECONDS `
+            -Iterations $env:REPRO_ITERATIONS
 
       - name: Upload repro logs
         if: always()
